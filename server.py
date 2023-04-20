@@ -43,7 +43,7 @@ async def archive(request, throttle_tick_time, photos_dir):
         
         await response.write_eof()
     except (web.HTTPRequestTimeout, ClientConnectionError, asyncio.CancelledError) as exc:
-        logging.error('Download was interrupted: ', exc.text)
+        logger.error('Download was interrupted: ', exc.text)
         raise exc
     finally:
         if process.returncode is None:
