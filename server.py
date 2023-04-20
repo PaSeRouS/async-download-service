@@ -7,15 +7,12 @@ import pathlib
 from aiohttp import web
 from argparse import ArgumentParser
 from asyncio import create_subprocess_exec, subprocess
+from functools import partial
 
-throttle_tick_time = 0
-photos_dir = 'test_photos'
 logger = logging.getLogger(__file__)
 
 
-async def archive(request):
-    global throttle_tick_time, photos_dir
-
+async def archive(request, throttle_tick_time, photos_dir):
     archive_hash = request.match_info['archive_hash']
 
     if not os.path.exists(os.path.join(photos_dir, archive_hash)):
@@ -35,7 +32,7 @@ async def archive(request):
     process = await create_subprocess_exec(exec, *args, stdout=subprocess.PIPE, cwd=photos_dir)
 
     try:
-        while True:
+        while not process.stdout.at_eof():
             data = await process.stdout.read(512000)
             logger.info(f'Sending archive chunk {archive_hash}({len(data)})')
 
@@ -43,13 +40,17 @@ async def archive(request):
                 await asyncio.sleep(throttle_tick_time)
 
             await response.write(data)
-            if process.stdout.at_eof():
-                break
         
         await response.write_eof()
+    except (web.HTTPRequestTimeout, ClientConnectionError, asyncio.CancelledError) as exc:
+        logging.error('Download was interrupted: ', exc.text)
+        raise exc
     finally:
-        process.kill()
-        logger.info(f'Download was interrupted.')
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
+
+            logger.info(f'Download was interrupted.')
 
     return response
 
@@ -60,7 +61,7 @@ async def handle_index_page(request):
     return web.Response(text=index_contents, content_type='text/html')
 
 
-if __name__ == '__main__':
+def main():
     parser = ArgumentParser()
     parser.add_argument('-l', '--logs', action='store_true', help='Флаг для вкдючения логгирования')
     parser.add_argument('-t', '--throttle_tick', type=int, default=0, help='Количество секунд задержки ответа')
@@ -70,12 +71,30 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.ERROR)
     if args.logs:
         logger.setLevel(logging.INFO)
-    throttle_tick_time = args.throttle_tick
-    photos_dir = args.photo_dir
+
+    if args.throttle_tick:
+        throttle_tick_time = args.throttle_tick
+    else:
+        throttle_tick_time = 0
+    
+    if args.photo_dir:
+        photos_dir = args.photo_dir
+    else:
+        photos_dir = 'test_photos'
+
+    archive_handler = partial(
+        archive,
+        throttle_tick_time=throttle_tick_time,
+        photos_dir=photos_dir
+    )
 
     app = web.Application()
     app.add_routes([
         web.get('/', handle_index_page),
-        web.get('/archive/{archive_hash}/', archive),
+        web.get('/archive/{archive_hash}/', archive_handler),
     ])
     web.run_app(app)
+
+
+if __name__ == '__main__':
+    main()
